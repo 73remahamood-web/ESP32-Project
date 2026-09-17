@@ -11,9 +11,31 @@ jobs:
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
-      - run: |
+      - name: Prepare sketch folder
+        run: |
           mkdir -p output
-          arduino-cli compile --fqbn esp32:esp32:esp32cam --output-dir ./output .
+          INO_FILE=$(find . -name "*.ino" -type f -not -path "./.git/*" | head -n 1)
+          if [ -z "$INO_FILE" ]; then
+            echo "❌ No .ino file found in the repository!"
+            exit 1
+          fi
+          echo "✅ Found sketch: $INO_FILE"
+          SKETCH_NAME=$(basename "$INO_FILE" .ino)
+          mkdir -p "build_sketch/$SKETCH_NAME"
+          # انسخ كل ملفات مجلد الـ ino الأصلي داخل المجلد الجديد
+          SRC_DIR=$(dirname "$INO_FILE")
+          cp -r "$SRC_DIR"/. "build_sketch/$SKETCH_NAME/"
+          # تأكد من أن اسم الملف يطابق اسم المجلد
+          if [ -f "build_sketch/$SKETCH_NAME/$SKETCH_NAME.ino" ]; then
+            echo "✅ Sketch name matches folder."
+          else
+            echo "⚠️ Renaming main .ino to match folder..."
+            mv "build_sketch/$SKETCH_NAME/"*.ino "build_sketch/$SKETCH_NAME/$SKETCH_NAME.ino"
+          fi
+          echo "SKETCH_DIR=build_sketch/$SKETCH_NAME" >> $GITHUB_ENV
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32cam --output-dir ./output "$SKETCH_DIR"
       - uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware
