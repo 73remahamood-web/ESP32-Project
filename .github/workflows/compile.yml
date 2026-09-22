@@ -1,4 +1,4 @@
-name: Compile ESP32-CAM
+name: Compile ESP32
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -24,7 +24,6 @@ jobs:
           SKETCH_NAME=$(basename "$INO_FILE" .ino)
           SRC_DIR=$(dirname "$INO_FILE")
           mkdir -p "build_sketch/$SKETCH_NAME"
-          # انسخ فقط الملفات المسموح بها، مع تجنب المجلدات الثقيلة
           for f in "$SRC_DIR"/*; do
             base=$(basename "$f")
             case "$base" in
@@ -32,7 +31,6 @@ jobs:
             esac
             cp -r "$f" "build_sketch/$SKETCH_NAME/"
           done
-          # تأكد من مطابقة اسم الملف لاسم المجلد
           if [ ! -f "build_sketch/$SKETCH_NAME/$SKETCH_NAME.ino" ]; then
             echo "⚠️ Renaming main .ino to match folder..."
             mv "build_sketch/$SKETCH_NAME/"*.ino "build_sketch/$SKETCH_NAME/$SKETCH_NAME.ino"
@@ -40,7 +38,7 @@ jobs:
           echo "SKETCH_DIR=build_sketch/$SKETCH_NAME" >> $GITHUB_ENV
       - name: Compile
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32cam --output-dir ./output "$SKETCH_DIR"
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./output "$SKETCH_DIR"
       - uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware
