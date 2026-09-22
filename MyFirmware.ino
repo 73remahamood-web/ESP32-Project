@@ -1,35 +1,30 @@
 // ==========================================
-// ESP32 DevKit - تحكم LED عبر الويب + Serial
-// خفيف جداً - لا مكتبات خارجية
+// ESP32-CAM - تحكم الفلاش عبر الويب + Serial
+// خفيف جداً - بدون كاميرا
 // ==========================================
 
 #include <WiFi.h>
 #include <WebServer.h>
 
-// -------- إعدادات WiFi --------
-const char* STA_SSID = "Osama";         // شبكتك
-const char* STA_PASS = "123456789";     // كلمة المرور
-const char* AP_SSID  = "ESP32-LED";     // لو فشل الاتصال
-const char* AP_PASS  = "12345678";      // 8 خانات على الأقل
+const char* STA_SSID = "Osama";
+const char* STA_PASS = "123456789";
+const char* AP_SSID  = "ESP32-FLASH";
+const char* AP_PASS  = "12345678";
 
-// -------- دبوس الـ LED --------
-#define LED_PIN 2
+// ⚠️ ESP32-CAM: الفلاش على GPIO 4
+#define LED_PIN 4
 
-// -------- متغيرات --------
 WebServer server(80);
 bool ledState = false;
 unsigned long bootMillis = 0;
 
-// ==========================================
-// صفحة HTML (خفيفة - بدون CSS ثقيل)
-// ==========================================
 const char PAGE_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32 LED</title>
+<title>ESP32 Flash</title>
 <style>
 body{font-family:Arial;text-align:center;padding:20px;background:#f0f0f0}
 h1{color:#333}
@@ -40,15 +35,15 @@ h1{color:#333}
 </style>
 </head>
 <body>
-<h1>ESP32 LED Control</h1>
+<h1>ESP32-CAM Flash</h1>
 <button id="b" class="btn" onclick="toggle()">...</button>
 <div class="info" id="info"></div>
 <script>
 function upd(){
   fetch('/state').then(r=>r.text()).then(s=>{
     var b=document.getElementById('b');
-    if(s=='1'){b.innerHTML='إطفاء الـ LED';b.className='btn on';}
-    else{b.innerHTML='تشغيل الـ LED';b.className='btn off';}
+    if(s=='1'){b.innerHTML='إطفاء الفلاش';b.className='btn on';}
+    else{b.innerHTML='تشغيل الفلاش';b.className='btn off';}
   });
 }
 function toggle(){fetch('/toggle').then(()=>upd());}
@@ -62,19 +57,13 @@ setInterval(getInfo,5000);
 </html>
 )HTML";
 
-// ==========================================
-// دالة تشغيل LED
-// ==========================================
 void setLED(bool state) {
     ledState = state;
     digitalWrite(LED_PIN, state ? HIGH : LOW);
-    Serial.print("💡 LED الآن: ");
+    Serial.print("💡 الفلاش الآن: ");
     Serial.println(state ? "مضاء" : "مطفأ");
 }
 
-// ==========================================
-// اتصال WiFi
-// ==========================================
 void connectWiFi() {
     Serial.println("=================================");
     Serial.print("📡 جاري الاتصال بـ: ");
@@ -95,9 +84,6 @@ void connectWiFi() {
         Serial.println("✅ تم الاتصال بشبكتك!");
         Serial.print("🌐 IP: http://");
         Serial.println(WiFi.localIP());
-        Serial.print("📶 قوة الإشارة: ");
-        Serial.print(WiFi.RSSI());
-        Serial.println(" dBm");
     } else {
         Serial.println("⚠️ فشل الاتصال، تشغيل شبكة خاصة...");
         WiFi.mode(WIFI_AP);
@@ -112,12 +98,9 @@ void connectWiFi() {
     Serial.println("=================================");
 }
 
-// ==========================================
-// معالجات الويب
-// ==========================================
 void handleRoot() {
     server.send_P(200, "text/html", PAGE_HTML);
-    Serial.println("📄 طلب الصفحة الرئيسية");
+    Serial.println("📄 طلب الصفحة");
 }
 
 void handleToggle() {
@@ -137,12 +120,8 @@ void handleInfo() {
     info += "<b>الذاكرة الحرة:</b> " + String(ESP.getFreeHeap()) + " bytes<br>";
     info += "<b>وقت التشغيل:</b> " + String((millis() - bootMillis) / 1000) + " ثانية";
     server.send(200, "text/html; charset=utf-8", info);
-    Serial.println("📊 استعلام معلومات");
 }
 
-// ==========================================
-// Setup
-// ==========================================
 void setup() {
     Serial.begin(115200);
     delay(500);
@@ -150,34 +129,28 @@ void setup() {
     
     Serial.println();
     Serial.println("=================================");
-    Serial.println("🚀 ESP32 DevKit - LED Control");
+    Serial.println("🚀 ESP32-CAM - Flash Control");
     Serial.println("=================================");
     
-    // سبب إعادة التشغيل
     Serial.print("🔎 سبب الإقلاع: ");
     switch (esp_reset_reason()) {
         case ESP_RST_POWERON:  Serial.println("طاقة جديدة"); break;
         case ESP_RST_BROWNOUT: Serial.println("⚠️ انخفاض جهد!"); break;
         case ESP_RST_PANIC:    Serial.println("⚠️ انهيار!"); break;
-        case ESP_RST_SW:       Serial.println("إعادة برمجية"); break;
         default:               Serial.println("أخرى"); break;
     }
     
-    // تهيئة LED
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
     
-    // وميض تعريفي
     for (int i = 0; i < 3; i++) {
         digitalWrite(LED_PIN, HIGH); delay(100);
         digitalWrite(LED_PIN, LOW);  delay(100);
     }
-    Serial.println("✅ اختبار LED: نجح");
+    Serial.println("✅ اختبار الفلاش: نجح");
     
-    // اتصال WiFi
     connectWiFi();
     
-    // مسارات الويب
     server.on("/", handleRoot);
     server.on("/toggle", handleToggle);
     server.on("/state", handleState);
@@ -191,17 +164,13 @@ void setup() {
     Serial.println("=================================");
 }
 
-// ==========================================
-// Loop
-// ==========================================
 void loop() {
     server.handleClient();
     
-    // مراقبة الاتصال كل 30 ثانية
     static unsigned long lastCheck = 0;
     if (millis() - lastCheck > 30000) {
         if (WiFi.getMode() == WIFI_STA && WiFi.status() != WL_CONNECTED) {
-            Serial.println("⚠️ فقد الاتصال، جاري إعادة المحاولة...");
+            Serial.println("⚠️ فقد الاتصال، إعادة محاولة...");
             WiFi.reconnect();
         }
         lastCheck = millis();
