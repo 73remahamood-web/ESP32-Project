@@ -1,4 +1,4 @@
-name: Compile ESP32
+name: Compile ESP32-CAM
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -38,7 +38,7 @@ jobs:
           echo "SKETCH_DIR=build_sketch/$SKETCH_NAME" >> $GITHUB_ENV
       - name: Compile
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./output "$SKETCH_DIR"
+          arduino-cli compile --fqbn esp32:esp32:esp32cam --output-dir ./output "$SKETCH_DIR"
       - uses: actions/upload-artifact@v4
         with:
           name: esp32-firmware
