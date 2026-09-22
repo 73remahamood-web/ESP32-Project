@@ -1,28 +1,29 @@
 // ==========================================
-// كود اختبار فلاش ESP32-CAM فقط
+// كود اختبار الـ LED المدمج في ESP32 العادي
 // ==========================================
 
-// دبوس الفلاش الأبيض في لوحة AI-Thinker / ESP32-CAM-MB
-#define FLASH_LED 4
+// معظم لوحات ESP32 DevKit تحتوي LED على GPIO 2
+// بعض اللوحات تستخدم GPIO 5 أو 15 أو 16
+#define BUILTIN_LED 2
 
 void setup() {
     Serial.begin(115200);
     delay(1000);
 
     Serial.println("=================================");
-    Serial.println("اختبار فلاش ESP32-CAM");
+    Serial.println("اختبار الـ LED المدمج");
     Serial.println("=================================");
 
-    pinMode(FLASH_LED, OUTPUT);
-    digitalWrite(FLASH_LED, LOW);  // ابدأ بإطفاء الفلاش
+    pinMode(BUILTIN_LED, OUTPUT);
+    digitalWrite(BUILTIN_LED, LOW);
 }
 
 void loop() {
-    Serial.println("💡 الفلاش مضاء");
-    digitalWrite(FLASH_LED, HIGH);   // تشغيل
-    delay(1000);                     // ثانية
+    Serial.println("💡 الـ LED مضاء");
+    digitalWrite(BUILTIN_LED, HIGH);
+    delay(500);                       // نصف ثانية
 
-    Serial.println("🌑 الفلاش مطفأ");
-    digitalWrite(FLASH_LED, LOW);    // إطفاء
-    delay(1000);                     // ثانية
+    Serial.println("🌑 الـ LED مطفأ");
+    digitalWrite(BUILTIN_LED, LOW);
+    delay(500);                       // نصف ثانية
 }
