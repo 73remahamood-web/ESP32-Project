@@ -5,17 +5,13 @@ on:
     paths:
       - "MyFirmware.ino"
       - ".github/workflows/build.yml"
-
   workflow_dispatch:
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -25,37 +21,39 @@ jobs:
       - name: Install ESP32 Arduino Core 3.3.12
         run: |
           arduino-cli config init
-
           arduino-cli core update-index \
-            --additional-urls \
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
-
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install \
             esp32:esp32@3.3.12 \
-            --additional-urls \
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
       - name: Show ESP32-CAM board details
         run: |
           arduino-cli board details \
             -b esp32:esp32:esp32cam
 
+      - name: Prepare Arduino sketch
+        run: |
+          rm -rf sketch build
+          mkdir -p sketch build
+          cp MyFirmware.ino sketch/sketch.ino
+          echo "Prepared sketch:"
+          ls -lah sketch/
+
       - name: Compile AI Thinker ESP32-CAM
         run: |
-          mkdir -p build
-
           arduino-cli compile \
             --fqbn esp32:esp32:esp32cam \
             --output-dir build \
-            .
+            sketch
 
       - name: Show generated firmware
         run: |
-          ls -lah build
+          echo "Generated files:"
+          find build -maxdepth 2 -type f -printf '%p  %k KB\n' | sort
 
       - name: Upload compiled firmware artifact
         uses: actions/upload-artifact@v4
-
         with:
           name: esp32-cam-firmware
           path: build/*
