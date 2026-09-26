@@ -1,60 +1,69 @@
-name: Build ESP32-CAM Firmware
+name: Build ESP32 DevKit Diagnostic
 
 on:
   push:
-    paths:
-      - "MyFirmware.ino"
-      - ".github/workflows/build.yml"
+    branches:
+      - main
+
   workflow_dispatch:
 
 jobs:
+
   build:
+
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Install ESP32 Arduino Core 3.3.12
+      - name: Configure ESP32 board manager
         run: |
           arduino-cli config init
-          arduino-cli core update-index \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install \
-            esp32:esp32@3.3.12 \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config set board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
 
-      - name: Show ESP32-CAM board details
+      - name: Install ESP32 Core 3.3.12
         run: |
-          arduino-cli board details \
-            -b esp32:esp32:esp32cam
+          arduino-cli core install esp32:esp32@3.3.12
 
-      - name: Prepare Arduino sketch
+      - name: Show board/core information
         run: |
-          rm -rf sketch build
-          mkdir -p sketch build
+          arduino-cli core list
+          arduino-cli board listall | grep -i "ESP32 Dev Module" || true
+
+      - name: Prepare sketch
+        run: |
+          mkdir -p sketch
           cp MyFirmware.ino sketch/sketch.ino
-          echo "Prepared sketch:"
-          ls -lah sketch/
 
-      - name: Compile AI Thinker ESP32-CAM
+      - name: Compile for ESP32 Dev Module
         run: |
+          mkdir -p build
+
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32cam \
+            --fqbn esp32:esp32:esp32 \
             --output-dir build \
             sketch
 
       - name: Show generated firmware
         run: |
-          echo "Generated files:"
-          find build -maxdepth 2 -type f -printf '%p  %k KB\n' | sort
+          echo "========================================"
+          echo "Generated files"
+          echo "========================================"
 
-      - name: Upload compiled firmware artifact
+          find build -type f -maxdepth 2 \
+            -printf '%p  %s bytes\n'
+
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-cam-firmware
+          name: esp32-devkit-diagnostic
           path: build/*
           if-no-files-found: error
+          retention-days: 7
