@@ -8,168 +8,186 @@ const char* WIFI_SSID = "Osama";
 const char* WIFI_PASSWORD = "123456789";
 
 // ============================================================
-// Target ESP32 UART
+// HC-SR04
 // ============================================================
-// المشتبه بها TX0/GPIO1 -> مقاومة 4.7k -> GPIO16 في اللوحة السليمة
-static const int TARGET_RX_PIN = 16;
-static const uint32_t TARGET_BAUD = 115200;
+static const int TRIG_PIN = 4;
+static const int ECHO_PIN = 34;
 
-HardwareSerial TargetSerial(2);
+// يسمح بقياس المسافات البعيدة دون انتظار طويل جداً
+static const unsigned long ECHO_TIMEOUT_US = 30000;
+
+// الفترة الافتراضية بين القياسات
+unsigned long measurementIntervalMs = 100;
+
+// ============================================================
+// Web Server
+// ============================================================
 WebServer server(80);
 
 // ============================================================
-// Logging
+// Measurement Data
 // ============================================================
-String logBuffer;
-String targetLine;
-String diagnosis = "Waiting for target ESP32 UART data...";
+volatile unsigned long totalMeasurements = 0;
+volatile unsigned long validMeasurements = 0;
+volatile unsigned long timeoutCount = 0;
 
-const size_t MAX_LOG_SIZE = 40000;
+unsigned long lastEchoUs = 0;
+unsigned long lastMeasurementAtMs = 0;
+unsigned long lastMeasurementStartUs = 0;
+unsigned long lastMeasurementGapUs = 0;
+unsigned long measurementExecutionUs = 0;
 
-uint32_t receivedBytes = 0;
-unsigned long lastByteAt = 0;
-unsigned long bootTime = 0;
+float lastDistanceCm = -1.0;
+float minDistanceCm = 99999.0;
+float maxDistanceCm = 0.0;
+double distanceSumCm = 0.0;
 
-bool firstTargetByteReceived = false;
-bool silenceReported = false;
+bool lastValid = false;
+bool measurementsEnabled = true;
 
 // ============================================================
 // Utility
 // ============================================================
-String uptimeString() {
-  unsigned long s = millis() / 1000;
-
-  unsigned long h = s / 3600;
-  unsigned long m = (s % 3600) / 60;
-  unsigned long sec = s % 60;
-
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", h, m, sec);
-
-  return String(buf);
+String jsonBool(bool v) {
+  return v ? "true" : "false";
 }
 
-void trimLog() {
-  if (logBuffer.length() > MAX_LOG_SIZE) {
-    size_t removeCount = logBuffer.length() - MAX_LOG_SIZE;
-
-    logBuffer.remove(0, removeCount);
-
-    logBuffer =
-      "\n[SYS] --- Older log data removed because buffer was full ---\n"
-      + logBuffer;
+String floatOrNull(float value, int decimals = 2) {
+  if (value < 0) {
+    return "null";
   }
-}
 
-void appendRaw(char c) {
-  logBuffer += c;
-  trimLog();
-}
-
-void systemLog(const String& message) {
-  String line =
-    "[" + uptimeString() + "] [SYS] " + message + "\n";
-
-  Serial.print(line);
-
-  logBuffer += line;
-  trimLog();
+  return String(value, decimals);
 }
 
 // ============================================================
-// Analyze boot messages from target ESP32
+// HC-SR04 Measurement
 // ============================================================
-void analyzeTargetLine(const String& line) {
+void measureUltrasonic() {
 
-  if (line.indexOf("DOWNLOAD_BOOT") >= 0 ||
-      line.indexOf("DOWNLOAD(USB/UART0)") >= 0) {
+  unsigned long startUs = micros();
 
-    diagnosis =
-      "GOOD: ESP32 ROM bootloader detected. "
-      "CPU/ROM/UART are alive and the board entered download mode.";
-
-    systemLog("DIAGNOSIS: ROM DOWNLOAD BOOT detected.");
+  if (lastMeasurementStartUs != 0) {
+    lastMeasurementGapUs =
+      startUs - lastMeasurementStartUs;
   }
 
-  else if (line.indexOf("SPI_FAST_FLASH_BOOT") >= 0) {
+  lastMeasurementStartUs = startUs;
 
-    diagnosis =
-      "GOOD: CPU and ROM are alive. "
-      "The ESP32 is attempting a normal boot from SPI flash.";
+  // تأكد أن TRIG منخفض قبل النبضة
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(3);
 
-    systemLog("DIAGNOSIS: Normal SPI flash boot detected.");
+  // نبضة التشغيل
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // انتظار نبضة Echo
+  unsigned long echoUs =
+    pulseIn(
+      ECHO_PIN,
+      HIGH,
+      ECHO_TIMEOUT_US
+    );
+
+  measurementExecutionUs =
+    micros() - startUs;
+
+  lastEchoUs = echoUs;
+  totalMeasurements++;
+
+  if (echoUs == 0) {
+
+    lastValid = false;
+    lastDistanceCm = -1.0;
+    timeoutCount++;
+
+    return;
   }
 
-  else if (line.indexOf("Brownout") >= 0 ||
-           line.indexOf("brownout") >= 0) {
+  // زمن Echo هو زمن الرحلة ذهاباً وإياباً
+  float distanceCm =
+    (echoUs * 0.0343f) / 2.0f;
 
-    diagnosis =
-      "POWER WARNING: Brownout message detected. "
-      "Power supply, cable or voltage stability may be the problem.";
+  lastDistanceCm = distanceCm;
+  lastValid = true;
 
-    systemLog("DIAGNOSIS: Brownout detected.");
+  validMeasurements++;
+
+  distanceSumCm += distanceCm;
+
+  if (distanceCm < minDistanceCm) {
+    minDistanceCm = distanceCm;
   }
 
-  else if (line.indexOf("invalid header") >= 0) {
-
-    diagnosis =
-      "FLASH WARNING: Invalid firmware/flash header detected. "
-      "The CPU is alive but flash contents may be corrupted.";
-
-    systemLog("DIAGNOSIS: Invalid flash header detected.");
-  }
-
-  else if (line.indexOf("flash read err") >= 0 ||
-           line.indexOf("SPI flash") >= 0 &&
-           line.indexOf("error") >= 0) {
-
-    diagnosis =
-      "FLASH WARNING: ESP32 reported a flash read problem.";
-
-    systemLog("DIAGNOSIS: Flash read problem detected.");
-  }
-
-  else if (line.indexOf("rst:") >= 0) {
-
-    diagnosis =
-      "ESP32 reset/boot message detected. "
-      "The processor ROM is responding.";
-
-    systemLog("DIAGNOSIS: ESP32 reset message detected.");
-  }
-
-  else if (line.indexOf("Guru Meditation") >= 0) {
-
-    diagnosis =
-      "APPLICATION CRASH: ESP32 is running but firmware is crashing.";
-
-    systemLog("DIAGNOSIS: Guru Meditation detected.");
-  }
-
-  else if (line.indexOf("watchdog") >= 0 ||
-           line.indexOf("WDT") >= 0) {
-
-    diagnosis =
-      "APPLICATION WARNING: Watchdog/reset condition detected.";
-
-    systemLog("DIAGNOSIS: Watchdog indication detected.");
+  if (distanceCm > maxDistanceCm) {
+    maxDistanceCm = distanceCm;
   }
 }
 
 // ============================================================
-// Web UI
+// Statistics
+// ============================================================
+float averageDistance() {
+
+  if (validMeasurements == 0) {
+    return -1.0;
+  }
+
+  return
+    distanceSumCm /
+    (double)validMeasurements;
+}
+
+float actualReadingRateHz() {
+
+  if (lastMeasurementGapUs == 0) {
+    return 0.0;
+  }
+
+  return
+    1000000.0f /
+    (float)lastMeasurementGapUs;
+}
+
+void resetStatistics() {
+
+  totalMeasurements = 0;
+  validMeasurements = 0;
+  timeoutCount = 0;
+
+  lastEchoUs = 0;
+  lastDistanceCm = -1;
+
+  minDistanceCm = 99999;
+  maxDistanceCm = 0;
+
+  distanceSumCm = 0;
+
+  lastMeasurementGapUs = 0;
+
+  lastValid = false;
+}
+
+// ============================================================
+// Web Page
 // ============================================================
 const char PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
+
 <head>
+
 <meta charset="UTF-8">
+
 <meta name="viewport"
       content="width=device-width,initial-scale=1">
 
-<title>ESP32 Diagnostic Monitor</title>
+<title>HC-SR04 Test</title>
 
 <style>
+
 *{
   box-sizing:border-box;
 }
@@ -182,19 +200,26 @@ body{
 }
 
 .container{
-  max-width:1100px;
+  max-width:1000px;
   margin:auto;
   padding:16px;
 }
 
 h1{
-  margin:0 0 8px;
-  font-size:25px;
+  margin:0;
+  font-size:26px;
 }
 
 .subtitle{
   color:#94a3b8;
-  margin-bottom:18px;
+  margin:7px 0 18px;
+}
+
+.grid{
+  display:grid;
+  grid-template-columns:
+    repeat(auto-fit,minmax(180px,1fr));
+  gap:10px;
 }
 
 .card{
@@ -202,31 +227,45 @@ h1{
   border:1px solid #334155;
   border-radius:14px;
   padding:15px;
-  margin-bottom:14px;
 }
 
-.status{
-  font-family:monospace;
+.label{
+  color:#94a3b8;
+  font-size:13px;
+}
+
+.value{
+  margin-top:7px;
+  font-size:25px;
+  font-weight:bold;
   direction:ltr;
-  text-align:left;
-  white-space:pre-wrap;
+}
+
+.good{
+  color:#22c55e;
+}
+
+.bad{
+  color:#ef4444;
+}
+
+.cyan{
   color:#22d3ee;
 }
 
-.buttons{
+.controls{
+  margin-top:12px;
   display:flex;
   flex-wrap:wrap;
   gap:8px;
-  margin-bottom:10px;
 }
 
-button,a.button{
+button{
   border:0;
   border-radius:9px;
-  padding:11px 15px;
+  padding:11px 14px;
   font-weight:bold;
   cursor:pointer;
-  text-decoration:none;
   background:#2563eb;
   color:white;
 }
@@ -239,32 +278,29 @@ button.danger{
   background:#991b1b;
 }
 
-#copyStatus{
-  color:#22d3ee;
-  margin:8px 0;
-  min-height:20px;
+button.green{
+  background:#047857;
 }
 
-pre{
-  background:#020617;
-  border:1px solid #334155;
-  border-radius:10px;
-  padding:12px;
+.report{
+  margin-top:12px;
+  min-height:20px;
+  color:#22d3ee;
+}
+
+canvas{
   width:100%;
-  height:55vh;
-  overflow:auto;
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-  direction:ltr;
-  text-align:left;
-  font-family:monospace;
-  font-size:13px;
+  height:240px;
+  background:#020617;
+  border-radius:10px;
+  margin-top:12px;
 }
 
 .small{
   color:#94a3b8;
   font-size:13px;
 }
+
 </style>
 </head>
 
@@ -272,161 +308,503 @@ pre{
 
 <div class="container">
 
-<h1>ESP32 Diagnostic Monitor</h1>
+<h1>HC-SR04 Diagnostic Test</h1>
 
 <div class="subtitle">
-مراقبة UART للوحة ESP32 المشتبه بها
+اختبار حساس واحد — Front Ultrasonic
+</div>
+
+<div class="grid">
+
+<div class="card">
+<div class="label">المسافة الحالية</div>
+<div class="value cyan" id="distance">--</div>
 </div>
 
 <div class="card">
-<strong>التشخيص الحالي</strong>
-<div id="diag" class="status">
-Waiting...
-</div>
+<div class="label">Echo Time</div>
+<div class="value" id="echo">--</div>
 </div>
 
 <div class="card">
+<div class="label">الحالة</div>
+<div class="value" id="valid">--</div>
+</div>
 
-<div class="buttons">
+<div class="card">
+<div class="label">معدل القياس الفعلي</div>
+<div class="value" id="rate">--</div>
+</div>
 
-<button onclick="copyLog()">
-نسخ السجل كاملًا
+<div class="card">
+<div class="label">أقل مسافة</div>
+<div class="value" id="min">--</div>
+</div>
+
+<div class="card">
+<div class="label">أكبر مسافة</div>
+<div class="value" id="max">--</div>
+</div>
+
+<div class="card">
+<div class="label">متوسط المسافة</div>
+<div class="value" id="avg">--</div>
+</div>
+
+<div class="card">
+<div class="label">عدد القراءات</div>
+<div class="value" id="total">--</div>
+</div>
+
+<div class="card">
+<div class="label">Timeouts</div>
+<div class="value" id="timeouts">--</div>
+</div>
+
+<div class="card">
+<div class="label">مدة تنفيذ القياس</div>
+<div class="value" id="execution">--</div>
+</div>
+
+<div class="card">
+<div class="label">Wi-Fi RSSI</div>
+<div class="value" id="rssi">--</div>
+</div>
+
+<div class="card">
+<div class="label">زمن HTTP</div>
+<div class="value" id="httpLatency">--</div>
+</div>
+
+</div>
+
+
+<div class="card" style="margin-top:12px">
+
+<div class="label">
+الفترة بين القياسات
+</div>
+
+<div class="controls">
+
+<button onclick="setIntervalMs(60)">
+60 ms
 </button>
 
-<a class="button secondary"
-   href="/download">
-تنزيل السجل
-</a>
+<button onclick="setIntervalMs(100)">
+100 ms
+</button>
+
+<button onclick="setIntervalMs(200)">
+200 ms
+</button>
+
+<button onclick="setIntervalMs(500)">
+500 ms
+</button>
+
+<button class="green"
+        onclick="toggleMeasurements()">
+تشغيل / إيقاف القياس
+</button>
 
 <button class="danger"
-        onclick="clearLog()">
-مسح السجل
+        onclick="resetStats()">
+تصفير الإحصاءات
+</button>
+
+<button class="secondary"
+        onclick="copyReport()">
+نسخ التقرير
 </button>
 
 </div>
 
-<div id="copyStatus"></div>
+<div class="report"
+     id="message">
+</div>
+
+<canvas id="graph"
+        width="900"
+        height="240">
+</canvas>
 
 <div class="small">
-يتم تحديث السجل تلقائيًا.
-اضغط EN أو نفّذ اختبار BOOT على اللوحة المشتبه بها أثناء بقاء هذه الصفحة مفتوحة.
+الرسم يعرض آخر القراءات الصحيحة.
 </div>
-
-<pre id="log">Loading...</pre>
 
 </div>
 
 </div>
+
 
 <script>
 
-let autoScroll = true;
+let history = [];
 
-const logBox = document.getElementById("log");
+let latestData = null;
 
-logBox.addEventListener("scroll", () => {
-  const distance =
-    logBox.scrollHeight -
-    logBox.scrollTop -
-    logBox.clientHeight;
+const canvas =
+  document.getElementById("graph");
 
-  autoScroll = distance < 80;
-});
+const ctx =
+  canvas.getContext("2d");
 
-async function refreshLog(){
 
-  try{
+function numberOrDash(v, decimals=1){
 
-    const r = await fetch(
-      "/api/log?t=" + Date.now()
-    );
+  if(
+    v === null ||
+    v === undefined
+  ){
+    return "--";
+  }
 
-    const text = await r.text();
+  return Number(v)
+    .toFixed(decimals);
+}
 
-    logBox.textContent = text;
 
-    if(autoScroll){
-      logBox.scrollTop = logBox.scrollHeight;
+function drawGraph(){
+
+  ctx.clearRect(
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+  if(history.length < 2)
+    return;
+
+  let max =
+    Math.max(...history);
+
+  let min =
+    Math.min(...history);
+
+  if(max === min){
+    max += 1;
+    min -= 1;
+  }
+
+  ctx.beginPath();
+
+  history.forEach(
+    (v,i)=>{
+
+      let x =
+        i /
+        (history.length-1) *
+        canvas.width;
+
+      let y =
+        canvas.height -
+        (
+          (v-min) /
+          (max-min)
+        ) *
+        (canvas.height-20)
+        -10;
+
+      if(i === 0)
+        ctx.moveTo(x,y);
+      else
+        ctx.lineTo(x,y);
     }
+  );
 
-  }catch(e){}
+  ctx.strokeStyle =
+    "#22d3ee";
+
+  ctx.lineWidth = 2;
+
+  ctx.stroke();
+
+  ctx.fillStyle =
+    "#94a3b8";
+
+  ctx.font =
+    "13px monospace";
+
+  ctx.fillText(
+    "MAX " +
+    max.toFixed(1) +
+    " cm",
+    10,
+    18
+  );
+
+  ctx.fillText(
+    "MIN " +
+    min.toFixed(1) +
+    " cm",
+    10,
+    canvas.height-8
+  );
 }
 
-async function refreshDiag(){
+
+async function refresh(){
 
   try{
 
-    const r = await fetch(
-      "/api/diag?t=" + Date.now()
-    );
+    let start =
+      performance.now();
 
-    document.getElementById("diag").textContent =
-      await r.text();
+    let response =
+      await fetch(
+        "/api/status?t=" +
+        Date.now()
+      );
 
-  }catch(e){}
-}
+    let data =
+      await response.json();
 
-async function copyLog(){
+    let end =
+      performance.now();
 
-  const text = logBox.textContent;
-  const status =
-    document.getElementById("copyStatus");
+    latestData = data;
 
-  try{
+    document.getElementById(
+      "distance"
+    ).textContent =
+      data.valid
+      ? numberOrDash(
+          data.distance_cm,
+          2
+        ) + " cm"
+      : "--";
 
-    if(
-      navigator.clipboard &&
-      window.isSecureContext
-    ){
+    document.getElementById(
+      "echo"
+    ).textContent =
+      data.echo_us +
+      " µs";
 
-      await navigator.clipboard.writeText(text);
+    let valid =
+      document.getElementById(
+        "valid"
+      );
+
+    if(data.valid){
+
+      valid.textContent =
+        "VALID";
+
+      valid.className =
+        "value good";
 
     }else{
 
-      const area =
-        document.createElement("textarea");
+      valid.textContent =
+        "TIMEOUT";
 
-      area.value = text;
-
-      area.style.position = "fixed";
-      area.style.left = "-9999px";
-
-      document.body.appendChild(area);
-
-      area.focus();
-      area.select();
-
-      document.execCommand("copy");
-
-      area.remove();
+      valid.className =
+        "value bad";
     }
 
-    status.textContent =
-      "تم نسخ السجل كاملًا.";
+    document.getElementById(
+      "rate"
+    ).textContent =
+      numberOrDash(
+        data.reading_hz,
+        2
+      ) + " Hz";
+
+    document.getElementById(
+      "min"
+    ).textContent =
+      data.min_cm === null
+      ? "--"
+      : numberOrDash(
+          data.min_cm,
+          2
+        ) + " cm";
+
+    document.getElementById(
+      "max"
+    ).textContent =
+      data.max_cm === null
+      ? "--"
+      : numberOrDash(
+          data.max_cm,
+          2
+        ) + " cm";
+
+    document.getElementById(
+      "avg"
+    ).textContent =
+      data.avg_cm === null
+      ? "--"
+      : numberOrDash(
+          data.avg_cm,
+          2
+        ) + " cm";
+
+    document.getElementById(
+      "total"
+    ).textContent =
+      data.total;
+
+    document.getElementById(
+      "timeouts"
+    ).textContent =
+      data.timeouts;
+
+    document.getElementById(
+      "execution"
+    ).textContent =
+      data.measurement_us +
+      " µs";
+
+    document.getElementById(
+      "rssi"
+    ).textContent =
+      data.rssi +
+      " dBm";
+
+    document.getElementById(
+      "httpLatency"
+    ).textContent =
+      Math.round(end-start) +
+      " ms";
+
+    if(
+      data.valid &&
+      data.distance_cm !== null
+    ){
+
+      history.push(
+        data.distance_cm
+      );
+
+      if(history.length > 80)
+        history.shift();
+
+      drawGraph();
+    }
 
   }catch(e){
 
-    status.textContent =
-      "تعذر النسخ التلقائي. استخدم زر تنزيل السجل.";
-
+    document.getElementById(
+      "message"
+    ).textContent =
+      "الاتصال مع ESP32 مفقود.";
   }
 }
 
-async function clearLog(){
+
+async function setIntervalMs(ms){
 
   await fetch(
-    "/clear",
+    "/api/interval?ms=" + ms
+  );
+
+  document.getElementById(
+    "message"
+  ).textContent =
+    "تم ضبط فترة القياس على " +
+    ms +
+    " ms";
+}
+
+
+async function resetStats(){
+
+  await fetch(
+    "/api/reset",
     {method:"POST"}
   );
 
-  await refreshLog();
+  history = [];
+
+  drawGraph();
+
+  document.getElementById(
+    "message"
+  ).textContent =
+    "تم تصفير الإحصاءات.";
 }
 
-setInterval(refreshLog,500);
-setInterval(refreshDiag,700);
 
-refreshLog();
-refreshDiag();
+async function toggleMeasurements(){
+
+  let r =
+    await fetch(
+      "/api/toggle",
+      {method:"POST"}
+    );
+
+  let data =
+    await r.json();
+
+  document.getElementById(
+    "message"
+  ).textContent =
+    data.enabled
+    ? "القياس يعمل."
+    : "تم إيقاف القياس.";
+}
+
+
+async function copyReport(){
+
+  if(!latestData)
+    return;
+
+  let text =
+
+`HC-SR04 TEST REPORT
+
+Distance: ${latestData.distance_cm} cm
+Echo: ${latestData.echo_us} us
+Valid: ${latestData.valid}
+
+Minimum: ${latestData.min_cm} cm
+Maximum: ${latestData.max_cm} cm
+Average: ${latestData.avg_cm} cm
+
+Total readings: ${latestData.total}
+Valid readings: ${latestData.valid_count}
+Timeouts: ${latestData.timeouts}
+
+Reading rate: ${latestData.reading_hz} Hz
+Measurement execution: ${latestData.measurement_us} us
+Configured interval: ${latestData.interval_ms} ms
+
+WiFi RSSI: ${latestData.rssi} dBm
+Uptime: ${latestData.uptime_ms} ms
+IP: ${latestData.ip}
+`;
+
+  try{
+
+    await navigator
+      .clipboard
+      .writeText(text);
+
+    document.getElementById(
+      "message"
+    ).textContent =
+      "تم نسخ تقرير الاختبار.";
+
+  }catch(e){
+
+    document.getElementById(
+      "message"
+    ).textContent =
+      text;
+  }
+}
+
+
+setInterval(
+  refresh,
+  250
+);
+
+refresh();
 
 </script>
 
@@ -434,33 +812,201 @@ refreshDiag();
 </html>
 )rawliteral";
 
+
+// ============================================================
+// API
+// ============================================================
+void handleStatus() {
+
+  float avg =
+    averageDistance();
+
+  String json = "{";
+
+  json += "\"valid\":";
+  json += jsonBool(lastValid);
+
+  json += ",\"distance_cm\":";
+  json +=
+    lastValid
+    ? String(lastDistanceCm, 3)
+    : "null";
+
+  json += ",\"echo_us\":";
+  json += String(lastEchoUs);
+
+  json += ",\"min_cm\":";
+
+  if (validMeasurements > 0)
+    json += String(minDistanceCm, 3);
+  else
+    json += "null";
+
+  json += ",\"max_cm\":";
+
+  if (validMeasurements > 0)
+    json += String(maxDistanceCm, 3);
+  else
+    json += "null";
+
+  json += ",\"avg_cm\":";
+
+  if (avg >= 0)
+    json += String(avg, 3);
+  else
+    json += "null";
+
+  json += ",\"total\":";
+  json += String(totalMeasurements);
+
+  json += ",\"valid_count\":";
+  json += String(validMeasurements);
+
+  json += ",\"timeouts\":";
+  json += String(timeoutCount);
+
+  json += ",\"reading_hz\":";
+  json += String(
+    actualReadingRateHz(),
+    3
+  );
+
+  json += ",\"measurement_us\":";
+  json += String(
+    measurementExecutionUs
+  );
+
+  json += ",\"interval_ms\":";
+  json += String(
+    measurementIntervalMs
+  );
+
+  json += ",\"enabled\":";
+  json += jsonBool(
+    measurementsEnabled
+  );
+
+  json += ",\"rssi\":";
+  json += String(
+    WiFi.RSSI()
+  );
+
+  json += ",\"uptime_ms\":";
+  json += String(
+    millis()
+  );
+
+  json += ",\"ip\":\"";
+  json +=
+    WiFi.localIP()
+    .toString();
+
+  json += "\"}";
+
+  server.send(
+    200,
+    "application/json",
+    json
+  );
+}
+
+
+void handleInterval() {
+
+  if (
+    server.hasArg("ms")
+  ) {
+
+    long requested =
+      server.arg("ms")
+      .toInt();
+
+    // لا نسمح بزمن قصير جداً
+    if (requested < 60)
+      requested = 60;
+
+    if (requested > 2000)
+      requested = 2000;
+
+    measurementIntervalMs =
+      requested;
+  }
+
+  server.send(
+    200,
+    "application/json",
+    "{\"ok\":true}"
+  );
+}
+
+
+void handleReset() {
+
+  resetStatistics();
+
+  server.send(
+    200,
+    "application/json",
+    "{\"ok\":true}"
+  );
+}
+
+
+void handleToggle() {
+
+  measurementsEnabled =
+    !measurementsEnabled;
+
+  String result =
+    "{\"enabled\":" +
+    jsonBool(
+      measurementsEnabled
+    ) +
+    "}";
+
+  server.send(
+    200,
+    "application/json",
+    result
+  );
+}
+
+
 // ============================================================
 // Wi-Fi
 // ============================================================
 void startWiFi() {
 
-  systemLog("Starting Wi-Fi...");
-  systemLog("SSID: " + String(WIFI_SSID));
+  Serial.println();
+  Serial.println(
+    "Connecting to Wi-Fi..."
+  );
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
+  WiFi.mode(
+    WIFI_STA
+  );
+
+  WiFi.setSleep(
+    false
+  );
 
   WiFi.begin(
     WIFI_SSID,
     WIFI_PASSWORD
   );
 
-  Serial.print("[WIFI] Connecting");
-
   unsigned long start =
     millis();
 
   while (
-    WiFi.status() != WL_CONNECTED &&
-    millis() - start < 20000
+    WiFi.status() !=
+      WL_CONNECTED &&
+    millis() - start <
+      20000
   ) {
 
     delay(500);
+
     Serial.print(".");
   }
 
@@ -471,23 +1017,8 @@ void startWiFi() {
     WL_CONNECTED
   ) {
 
-    systemLog(
-      "Wi-Fi CONNECTED"
-    );
-
-    systemLog(
-      "IP Address: " +
-      WiFi.localIP().toString()
-    );
-
-    systemLog(
-      "Open in browser: http://" +
-      WiFi.localIP().toString()
-    );
-
-    Serial.println();
     Serial.println(
-      "================================"
+      "Wi-Fi CONNECTED"
     );
 
     Serial.print(
@@ -498,59 +1029,51 @@ void startWiFi() {
       WiFi.localIP()
     );
 
-    Serial.println(
-      "================================"
-    );
-
-    Serial.println();
-
   } else {
 
-    systemLog(
-      "WARNING: Failed to connect to Osama hotspot."
+    Serial.println(
+      "Wi-Fi failed."
     );
 
-    systemLog(
-      "Starting emergency diagnostic Access Point."
+    Serial.println(
+      "Starting fallback AP."
     );
 
-    WiFi.disconnect(true);
-    delay(500);
+    WiFi.disconnect(
+      true
+    );
 
-    WiFi.mode(WIFI_AP);
+    delay(300);
+
+    WiFi.mode(
+      WIFI_AP
+    );
 
     WiFi.softAP(
-      "ESP32-DIAG",
+      "ESP32-HCSR04",
       "12345678"
     );
 
-    IPAddress ip =
-      WiFi.softAPIP();
-
-    systemLog(
-      "Fallback AP: ESP32-DIAG"
+    Serial.print(
+      "Fallback IP: "
     );
 
-    systemLog(
-      "Fallback password: 12345678"
-    );
-
-    systemLog(
-      "Fallback IP: " +
-      ip.toString()
+    Serial.println(
+      WiFi.softAPIP()
     );
   }
 }
 
+
 // ============================================================
-// Web server
+// Web Server
 // ============================================================
 void startWebServer() {
 
   server.on(
     "/",
     HTTP_GET,
-    [](){
+    []() {
 
       server.send_P(
         200,
@@ -561,195 +1084,97 @@ void startWebServer() {
   );
 
   server.on(
-    "/api/log",
+    "/api/status",
     HTTP_GET,
-    [](){
-
-      server.send(
-        200,
-        "text/plain; charset=utf-8",
-        logBuffer
-      );
-    }
+    handleStatus
   );
 
   server.on(
-    "/api/diag",
+    "/api/interval",
     HTTP_GET,
-    [](){
-
-      String result;
-
-      result +=
-        "Diagnosis: " +
-        diagnosis +
-        "\n";
-
-      result +=
-        "UART bytes received: " +
-        String(receivedBytes) +
-        "\n";
-
-      if(lastByteAt > 0){
-
-        result +=
-          "Last UART activity: " +
-          String(
-            (millis() - lastByteAt) /
-            1000
-          ) +
-          " seconds ago\n";
-
-      }else{
-
-        result +=
-          "Last UART activity: NONE\n";
-      }
-
-      result +=
-        "Listening pin: GPIO16 / RX2\n";
-
-      result +=
-        "UART baud: 115200\n";
-
-      if(
-        WiFi.status() ==
-        WL_CONNECTED
-      ){
-
-        result +=
-          "Web IP: " +
-          WiFi.localIP().toString();
-      }
-
-      server.send(
-        200,
-        "text/plain; charset=utf-8",
-        result
-      );
-    }
+    handleInterval
   );
 
   server.on(
-    "/download",
-    HTTP_GET,
-    [](){
-
-      server.sendHeader(
-        "Content-Disposition",
-        "attachment; filename=esp32-diagnostic-log.txt"
-      );
-
-      server.send(
-        200,
-        "text/plain; charset=utf-8",
-        logBuffer
-      );
-    }
-  );
-
-  server.on(
-    "/clear",
+    "/api/reset",
     HTTP_POST,
-    [](){
+    handleReset
+  );
 
-      logBuffer = "";
-      targetLine = "";
-
-      systemLog(
-        "Web log manually cleared."
-      );
-
-      server.send(
-        200,
-        "text/plain",
-        "OK"
-      );
-    }
+  server.on(
+    "/api/toggle",
+    HTTP_POST,
+    handleToggle
   );
 
   server.begin();
 
-  systemLog(
-    "Web diagnostic server started."
+  Serial.println(
+    "Web server started."
   );
 }
+
 
 // ============================================================
 // Setup
 // ============================================================
 void setup() {
 
-  Serial.begin(115200);
-
-  delay(1200);
-
-  logBuffer.reserve(
-    MAX_LOG_SIZE + 1024
+  Serial.begin(
+    115200
   );
 
-  targetLine.reserve(512);
+  delay(1000);
 
-  bootTime = millis();
+  pinMode(
+    TRIG_PIN,
+    OUTPUT
+  );
+
+  pinMode(
+    ECHO_PIN,
+    INPUT
+  );
+
+  digitalWrite(
+    TRIG_PIN,
+    LOW
+  );
 
   Serial.println();
-  Serial.println();
   Serial.println(
-    "============================================"
+    "======================================"
   );
+
   Serial.println(
-    " ESP32 SAFE UART DIAGNOSTIC MONITOR"
+    " NES HC-SR04 SINGLE SENSOR TEST"
   );
+
   Serial.println(
-    "============================================"
+    "======================================"
   );
 
-  systemLog(
-    "Diagnostic ESP32 started."
+  Serial.println(
+    "TRIG: GPIO4"
   );
 
-  systemLog(
-    "IMPORTANT: This board is LISTENING ONLY."
+  Serial.println(
+    "ECHO: GPIO34"
   );
 
-  systemLog(
-    "Target TX0 -> 4.7k resistor -> GPIO16."
-  );
-
-  systemLog(
-    "Target GND -> Diagnostic GND."
-  );
-
-  systemLog(
-    "DO NOT connect 5V/3V3/VIN between boards."
-  );
-
-  TargetSerial.begin(
-    TARGET_BAUD,
-    SERIAL_8N1,
-    TARGET_RX_PIN,
-    -1
-  );
-
-  systemLog(
-    "UART2 RX initialized on GPIO16 at 115200 baud."
+  Serial.println(
+    "IMPORTANT: Echo must use 1k/2k divider."
   );
 
   startWiFi();
+
   startWebServer();
 
-  systemLog(
+  Serial.println(
     "READY."
   );
-
-  systemLog(
-    "Now reset the TARGET ESP32 using EN."
-  );
-
-  systemLog(
-    "Then test BOOT + EN on the TARGET."
-  );
 }
+
 
 // ============================================================
 // Loop
@@ -758,117 +1183,17 @@ void loop() {
 
   server.handleClient();
 
-  while(
-    TargetSerial.available()
-  ){
+  if (
+    measurementsEnabled &&
+    millis() -
+      lastMeasurementAtMs >=
+      measurementIntervalMs
+  ) {
 
-    int value =
-      TargetSerial.read();
+    lastMeasurementAtMs =
+      millis();
 
-    if(value < 0)
-      break;
-
-    char c =
-      (char)value;
-
-    receivedBytes++;
-    lastByteAt = millis();
-
-    if(
-      !firstTargetByteReceived
-    ){
-
-      firstTargetByteReceived = true;
-
-      systemLog(
-        "FIRST UART DATA RECEIVED FROM TARGET."
-      );
-
-      Serial.println(
-        "----- TARGET UART START -----"
-      );
-    }
-
-    // كل بايت من اللوحة المعطلة يطبع
-    // مباشرة أيضاً على Serial Monitor
-    Serial.write(
-      (uint8_t)value
-    );
-
-    appendRaw(c);
-
-    if(
-      c == '\n' ||
-      c == '\r'
-    ){
-
-      if(
-        targetLine.length() > 0
-      ){
-
-        analyzeTargetLine(
-          targetLine
-        );
-
-        targetLine = "";
-      }
-
-    }else{
-
-      if(
-        c >= 32 &&
-        c <= 126
-      ){
-
-        targetLine += c;
-
-      }else{
-
-        // Non-printable byte marker
-        char hexbuf[8];
-
-        snprintf(
-          hexbuf,
-          sizeof(hexbuf),
-          "<%02X>",
-          (uint8_t)value
-        );
-
-        targetLine +=
-          String(hexbuf);
-      }
-
-      if(
-        targetLine.length() >
-        600
-      ){
-
-        analyzeTargetLine(
-          targetLine
-        );
-
-        targetLine = "";
-      }
-    }
-  }
-
-  // No signal warning
-  if(
-    !firstTargetByteReceived &&
-    !silenceReported &&
-    millis() - bootTime > 15000
-  ){
-
-    silenceReported = true;
-
-    diagnosis =
-      "NO UART DATA YET. "
-      "Reset the target ESP32 with EN. "
-      "If still silent, try BOOT+EN.";
-
-    systemLog(
-      "No target UART bytes detected during first 15 seconds."
-    );
+    measureUltrasonic();
   }
 
   delay(1);
