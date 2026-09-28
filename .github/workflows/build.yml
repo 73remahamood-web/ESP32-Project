@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 jobs:
@@ -21,6 +20,7 @@ jobs:
       - name: Install ESP32 Core 3.3.12
         run: |
           arduino-cli config init
+
           arduino-cli core update-index \
             --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
@@ -43,11 +43,11 @@ jobs:
 
       - name: Show generated files
         run: |
-          find build -type f -maxdepth 2 -print
+          find build -maxdepth 2 -type f -print
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-devkit-ping
+          name: esp32-devkit-motors-v020
           path: build/
           if-no-files-found: error
