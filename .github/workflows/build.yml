@@ -1,4 +1,4 @@
-name: Build HC-SR04 ESP32 Test
+name: Build ESP32 DevKit Firmware
 
 on:
   push:
@@ -8,36 +8,31 @@ on:
   workflow_dispatch:
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Configure ESP32 board manager
-        run: |
-          arduino-cli config init
-          arduino-cli config set board_manager.additional_urls \
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core update-index
-
       - name: Install ESP32 Core 3.3.12
         run: |
-          arduino-cli core install esp32:esp32@3.3.12
+          arduino-cli config init
+          arduino-cli core update-index \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Prepare sketch
+          arduino-cli core install esp32:esp32@3.3.12 \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Prepare Arduino sketch
         run: |
           mkdir -p sketch
           cp MyFirmware.ino sketch/sketch.ino
 
-      - name: Compile
+      - name: Compile ESP32 DevKit
         run: |
           mkdir -p build
 
@@ -46,16 +41,13 @@ jobs:
             --output-dir build \
             sketch
 
-      - name: Show firmware files
+      - name: Show generated files
         run: |
-          find build \
-            -type f \
-            -printf '%f  %s bytes\n'
+          find build -type f -maxdepth 2 -print
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-hcsr04-test
-          path: build/*
+          name: esp32-devkit-ping
+          path: build/
           if-no-files-found: error
-          retention-days: 7
