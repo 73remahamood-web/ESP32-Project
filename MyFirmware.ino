@@ -45,7 +45,7 @@ constexpr uint8_t PIN_IN3 = 15;
 constexpr uint8_t PIN_IN4 = 2;
 
 constexpr bool LEFT_INVERT  = false;
-constexpr bool RIGHT_INVERT = false;
+constexpr bool RIGHT_INVERT = true;
 
 // PWM directly on direction pins.
 constexpr uint32_t PWM_FREQ = 12000;
