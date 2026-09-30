@@ -1,540 +1,506 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-// ======================================================
-// NEXT ESP32 DIRECT HARDWARE BRIDGE
-// Firmware 0.2.0
-// ESP32 DevKit V1 + L298N + 4 TT Motors
-// ======================================================
+// ============================================================
+// NES ESP32-CAM MOTOR CONTROLLER
+// No Camera
+// No ENA / ENB control
+// L298N ENA + ENB jumpers must stay installed
+// ============================================================
+
+#define FW_VERSION "0.3.0-ESP32CAM-DIRECTION"
+#define DEVICE_NAME "NEXT-ESP32-CAM"
+
+// ---------------- Wi-Fi ----------------
 
 const char* WIFI_SSID = "Osama";
 const char* WIFI_PASSWORD = "123456789";
 
-const char* DEVICE_NAME = "NEXT-ESP32";
-const char* FIRMWARE_VERSION = "0.2.0";
+// ---------------- L298N ----------------
+//
+// LEFT:
+// IN1 = GPIO13
+// IN2 = GPIO14
+//
+// RIGHT:
+// IN3 = GPIO15
+// IN4 = GPIO2
+//
+// ENA and ENB:
+// Do NOT connect them to ESP32-CAM.
+// Keep their jumpers installed on L298N.
+//
+
+constexpr uint8_t LEFT_IN1  = 13;
+constexpr uint8_t LEFT_IN2  = 14;
+
+constexpr uint8_t RIGHT_IN1 = 15;
+constexpr uint8_t RIGHT_IN2 = 2;
+
+// ---------------- Safety ----------------
+
+constexpr uint32_t DEFAULT_TTL_MS = 700;
+constexpr uint32_t MIN_TTL_MS = 200;
+constexpr uint32_t MAX_TTL_MS = 1200;
 
 WebServer server(80);
 
-// ======================================================
-// L298N pins
-// ======================================================
-
-constexpr uint8_t PIN_ENA = 25;
-constexpr uint8_t PIN_IN1 = 26;
-constexpr uint8_t PIN_IN2 = 27;
-
-constexpr uint8_t PIN_ENB = 33;
-constexpr uint8_t PIN_IN3 = 32;
-constexpr uint8_t PIN_IN4 = 23;
-
-// إذا كانت جهة كاملة تدور بالعكس، غيّر false إلى true.
-constexpr bool LEFT_INVERT  = false;
-constexpr bool RIGHT_INVERT = false;
-
-// PWM
-constexpr uint32_t PWM_FREQ = 18000;
-constexpr uint8_t PWM_RESOLUTION = 8;
-
-// نبدأ بحد آمن منخفض نسبيًا.
-// المجال الكامل 0..255، لكننا لا نسمح بأكثر من 180 الآن.
-constexpr int MAX_SAFE_PWM = 180;
-
-// Dead-man timeout:
-// إذا لم يصل أمر حركة جديد خلال TTL تتوقف المحركات تلقائيًا.
-constexpr unsigned long DEFAULT_TTL_MS = 700;
-constexpr unsigned long MIN_TTL_MS = 100;
-constexpr unsigned long MAX_TTL_MS = 1200;
-
-// ======================================================
-// Runtime state
-// ======================================================
-
 bool armed = false;
 bool estop = false;
-bool motionActive = false;
 
-int currentLeftPwm = 0;
-int currentRightPwm = 0;
+int currentLeft = 0;
+int currentRight = 0;
 
-unsigned long lastDriveAt = 0;
-unsigned long activeTtlMs = DEFAULT_TTL_MS;
+uint32_t driveDeadlineMs = 0;
 
-String lastCommand = "BOOT_STOP";
+bool wifiWasConnected = false;
 
-// ======================================================
+// ============================================================
 // Helpers
-// ======================================================
+// ============================================================
+
+void addCors() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+void motorStopRaw() {
+  digitalWrite(LEFT_IN1, LOW);
+  digitalWrite(LEFT_IN2, LOW);
+
+  digitalWrite(RIGHT_IN1, LOW);
+  digitalWrite(RIGHT_IN2, LOW);
+
+  currentLeft = 0;
+  currentRight = 0;
+  driveDeadlineMs = 0;
+}
+
+void setLeftMotor(int value) {
+  if (value > 0) {
+    digitalWrite(LEFT_IN1, HIGH);
+    digitalWrite(LEFT_IN2, LOW);
+  }
+  else if (value < 0) {
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, HIGH);
+  }
+  else {
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, LOW);
+  }
+}
+
+void setRightMotor(int value) {
+  if (value > 0) {
+    digitalWrite(RIGHT_IN1, HIGH);
+    digitalWrite(RIGHT_IN2, LOW);
+  }
+  else if (value < 0) {
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, HIGH);
+  }
+  else {
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, LOW);
+  }
+}
+
+void applyDrive(int left, int right, uint32_t ttl) {
+
+  if (!armed || estop) {
+    motorStopRaw();
+    return;
+  }
+
+  left = constrain(left, -100, 100);
+  right = constrain(right, -100, 100);
+
+  ttl = constrain(ttl, MIN_TTL_MS, MAX_TTL_MS);
+
+  setLeftMotor(left);
+  setRightMotor(right);
+
+  currentLeft = left;
+  currentRight = right;
+
+  if (left == 0 && right == 0) {
+    driveDeadlineMs = 0;
+  } else {
+    driveDeadlineMs = millis() + ttl;
+  }
+}
 
 String boolJson(bool value) {
   return value ? "true" : "false";
 }
 
-void sendJson(int status, const String& body) {
-  server.send(status, "application/json", body);
-}
+String stateJson() {
 
-void setOneMotorSide(
-  uint8_t enablePin,
-  uint8_t inA,
-  uint8_t inB,
-  int value,
-  bool invert
-) {
-  value = constrain(value, -MAX_SAFE_PWM, MAX_SAFE_PWM);
+  String ip = "0.0.0.0";
 
-  if (invert) {
-    value = -value;
+  if (WiFi.status() == WL_CONNECTED) {
+    ip = WiFi.localIP().toString();
   }
-
-  if (value > 0) {
-    digitalWrite(inA, HIGH);
-    digitalWrite(inB, LOW);
-    ledcWrite(enablePin, value);
-  }
-  else if (value < 0) {
-    digitalWrite(inA, LOW);
-    digitalWrite(inB, HIGH);
-    ledcWrite(enablePin, -value);
-  }
-  else {
-    digitalWrite(inA, LOW);
-    digitalWrite(inB, LOW);
-    ledcWrite(enablePin, 0);
-  }
-}
-
-void applyDrive(int left, int right) {
-  left = constrain(left, -MAX_SAFE_PWM, MAX_SAFE_PWM);
-  right = constrain(right, -MAX_SAFE_PWM, MAX_SAFE_PWM);
-
-  setOneMotorSide(
-    PIN_ENA,
-    PIN_IN1,
-    PIN_IN2,
-    left,
-    LEFT_INVERT
-  );
-
-  setOneMotorSide(
-    PIN_ENB,
-    PIN_IN3,
-    PIN_IN4,
-    right,
-    RIGHT_INVERT
-  );
-
-  currentLeftPwm = left;
-  currentRightPwm = right;
-
-  motionActive = (left != 0 || right != 0);
-}
-
-void stopMotors(const String& reason) {
-  applyDrive(0, 0);
-
-  motionActive = false;
-  currentLeftPwm = 0;
-  currentRightPwm = 0;
-
-  lastCommand = reason;
-
-  Serial.print("[MOTOR] STOP: ");
-  Serial.println(reason);
-}
-
-unsigned long ttlRemaining() {
-  if (!motionActive) {
-    return 0;
-  }
-
-  unsigned long elapsed = millis() - lastDriveAt;
-
-  if (elapsed >= activeTtlMs) {
-    return 0;
-  }
-
-  return activeTtlMs - elapsed;
-}
-
-// ======================================================
-// HTTP GET /
-// ======================================================
-
-void handleRoot() {
-  String json = "{";
-  json += "\"ok\":true,";
-  json += "\"device\":\"" + String(DEVICE_NAME) + "\",";
-  json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
-  json += "\"message\":\"NEXT ESP32 motor bridge online\"";
-  json += "}";
-
-  sendJson(200, json);
-}
-
-// ======================================================
-// GET /ping
-// ======================================================
-
-void handlePing() {
-  String json = "{";
-  json += "\"ok\":true,";
-  json += "\"device\":\"" + String(DEVICE_NAME) + "\",";
-  json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
-  json += "\"mode\":\"hardware\",";
-  json += "\"uptimeMs\":" + String(millis());
-  json += "}";
-
-  sendJson(200, json);
-}
-
-// ======================================================
-// GET /state
-// ======================================================
-
-void handleState() {
-  bool wifiConnected = WiFi.status() == WL_CONNECTED;
 
   String json = "{";
 
-  json += "\"ok\":true,";
-  json += "\"device\":\"" + String(DEVICE_NAME) + "\",";
-  json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
-
-  json += "\"wifiConnected\":" + boolJson(wifiConnected) + ",";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-
-  json += "\"armed\":" + boolJson(armed) + ",";
-  json += "\"estop\":" + boolJson(estop) + ",";
-
-  json += "\"motion\":\"";
-  json += motionActive ? "moving" : "stopped";
+  json += "\"device\":\"";
+  json += DEVICE_NAME;
   json += "\",";
 
-  json += "\"leftPwm\":" + String(currentLeftPwm) + ",";
-  json += "\"rightPwm\":" + String(currentRightPwm) + ",";
+  json += "\"firmware\":\"";
+  json += FW_VERSION;
+  json += "\",";
 
-  json += "\"ttlRemainingMs\":" + String(ttlRemaining()) + ",";
-  json += "\"lastCommand\":\"" + lastCommand + "\",";
+  json += "\"board\":\"ESP32-CAM AI-Thinker\",";
 
-  json += "\"uptimeMs\":" + String(millis());
+  json += "\"cameraEnabled\":false,";
+
+  json += "\"motorMode\":\"direction-only\",";
+
+  json += "\"enaControlled\":false,";
+  json += "\"enbControlled\":false,";
+
+  json += "\"armed\":";
+  json += boolJson(armed);
+  json += ",";
+
+  json += "\"estop\":";
+  json += boolJson(estop);
+  json += ",";
+
+  json += "\"left\":";
+  json += String(currentLeft);
+  json += ",";
+
+  json += "\"right\":";
+  json += String(currentRight);
+  json += ",";
+
+  json += "\"wifi\":";
+  json += boolJson(WiFi.status() == WL_CONNECTED);
+  json += ",";
+
+  json += "\"ssid\":\"";
+  json += WIFI_SSID;
+  json += "\",";
+
+  json += "\"ip\":\"";
+  json += ip;
+  json += "\",";
+
+  json += "\"rssi\":";
+
+  if (WiFi.status() == WL_CONNECTED) {
+    json += String(WiFi.RSSI());
+  } else {
+    json += "null";
+  }
+
+  json += ",";
+
+  json += "\"pins\":{";
+  json += "\"leftIn1\":13,";
+  json += "\"leftIn2\":14,";
+  json += "\"rightIn1\":15,";
+  json += "\"rightIn2\":2";
+  json += "}";
 
   json += "}";
 
-  sendJson(200, json);
+  return json;
 }
 
-// ======================================================
-// POST /arm
-// ======================================================
-
-void handleArm() {
-  if (estop) {
-    sendJson(
-      423,
-      "{\"ok\":false,\"error\":\"ESTOP_ACTIVE\"}"
-    );
-    return;
-  }
-
-  stopMotors("ARM_STOP");
-
-  armed = true;
-
-  Serial.println("[SAFETY] ARMED");
-
-  sendJson(
-    200,
-    "{\"ok\":true,\"armed\":true,\"motion\":\"stopped\"}"
-  );
+void sendJson(int code, const String& body) {
+  addCors();
+  server.send(code, "application/json; charset=utf-8", body);
 }
 
-// ======================================================
-// POST /disarm
-// ======================================================
-
-void handleDisarm() {
-  stopMotors("DISARM");
-
-  armed = false;
-
-  Serial.println("[SAFETY] DISARMED");
-
-  sendJson(
-    200,
-    "{\"ok\":true,\"armed\":false,\"motion\":\"stopped\"}"
-  );
-}
-
-// ======================================================
-// POST /stop
-// ======================================================
-
-void handleStop() {
-  stopMotors("STOP");
-
-  sendJson(
-    200,
-    "{\"ok\":true,\"motion\":\"stopped\"}"
-  );
-}
-
-// ======================================================
-// POST /estop
-// ======================================================
-
-void handleEstop() {
-  stopMotors("ESTOP");
-
-  estop = true;
-  armed = false;
-
-  Serial.println("[SAFETY] ESTOP ACTIVE");
-
-  sendJson(
-    200,
-    "{\"ok\":true,\"estop\":true,\"armed\":false,\"motion\":\"stopped\"}"
-  );
-}
-
-// ======================================================
-// POST /estop/clear
-// ======================================================
-
-void handleEstopClear() {
-  stopMotors("ESTOP_CLEAR");
-
-  estop = false;
-  armed = false;
-
-  Serial.println("[SAFETY] ESTOP CLEARED");
-
-  sendJson(
-    200,
-    "{\"ok\":true,\"estop\":false,\"armed\":false,\"motion\":\"stopped\"}"
-  );
-}
-
-// ======================================================
-// POST /drive?left=90&right=90&ttl=700
-// ======================================================
-
-void handleDrive() {
-  if (estop) {
-    sendJson(
-      423,
-      "{\"ok\":false,\"error\":\"ESTOP_ACTIVE\"}"
-    );
-    return;
-  }
-
-  if (!armed) {
-    sendJson(
-      409,
-      "{\"ok\":false,\"error\":\"ROBOT_NOT_ARMED\"}"
-    );
-    return;
-  }
-
-  if (!server.hasArg("left") || !server.hasArg("right")) {
-    sendJson(
-      400,
-      "{\"ok\":false,\"error\":\"LEFT_RIGHT_REQUIRED\"}"
-    );
-    return;
-  }
-
-  int left = server.arg("left").toInt();
-  int right = server.arg("right").toInt();
-
-  left = constrain(left, -MAX_SAFE_PWM, MAX_SAFE_PWM);
-  right = constrain(right, -MAX_SAFE_PWM, MAX_SAFE_PWM);
-
-  unsigned long ttl = DEFAULT_TTL_MS;
-
-  if (server.hasArg("ttl")) {
-    long requested = server.arg("ttl").toInt();
-
-    if (requested < (long)MIN_TTL_MS) {
-      requested = MIN_TTL_MS;
-    }
-
-    if (requested > (long)MAX_TTL_MS) {
-      requested = MAX_TTL_MS;
-    }
-
-    ttl = (unsigned long)requested;
-  }
-
-  activeTtlMs = ttl;
-  lastDriveAt = millis();
-
-  applyDrive(left, right);
-
-  if (left == 0 && right == 0) {
-    lastCommand = "DRIVE_ZERO";
-  } else {
-    lastCommand = "DRIVE";
-  }
+void sendOk(const String& action) {
 
   String json = "{";
   json += "\"ok\":true,";
-  json += "\"left\":" + String(left) + ",";
-  json += "\"right\":" + String(right) + ",";
-  json += "\"ttlMs\":" + String(ttl);
+  json += "\"action\":\"";
+  json += action;
+  json += "\",";
+  json += "\"state\":";
+  json += stateJson();
   json += "}";
 
   sendJson(200, json);
 }
 
-// ======================================================
-// 404
-// ======================================================
+void sendError(int code, const String& error) {
 
-void handleNotFound() {
   String json = "{";
   json += "\"ok\":false,";
-  json += "\"error\":\"NOT_FOUND\",";
-  json += "\"path\":\"" + server.uri() + "\"";
+  json += "\"error\":\"";
+  json += error;
+  json += "\"";
   json += "}";
 
-  sendJson(404, json);
+  sendJson(code, json);
 }
 
-// ======================================================
+// ============================================================
+// HTTP routes
+// ============================================================
+
+void setupRoutes() {
+
+  server.on("/", HTTP_GET, []() {
+
+    String text =
+      "NES ESP32-CAM Motor Controller\n"
+      "Firmware: " FW_VERSION "\n"
+      "Camera: disabled\n"
+      "Motor mode: direction only\n";
+
+    addCors();
+    server.send(200, "text/plain; charset=utf-8", text);
+  });
+
+  server.on("/ping", HTTP_GET, []() {
+
+    String json = "{";
+    json += "\"ok\":true,";
+    json += "\"device\":\"";
+    json += DEVICE_NAME;
+    json += "\",";
+    json += "\"firmware\":\"";
+    json += FW_VERSION;
+    json += "\"";
+    json += "}";
+
+    sendJson(200, json);
+  });
+
+  server.on("/state", HTTP_GET, []() {
+    sendJson(200, stateJson());
+  });
+
+  server.on("/arm", HTTP_ANY, []() {
+
+    if (estop) {
+      sendError(409, "ESTOP_ACTIVE");
+      return;
+    }
+
+    motorStopRaw();
+    armed = true;
+
+    sendOk("arm");
+  });
+
+  server.on("/disarm", HTTP_ANY, []() {
+
+    motorStopRaw();
+    armed = false;
+
+    sendOk("disarm");
+  });
+
+  server.on("/stop", HTTP_ANY, []() {
+
+    motorStopRaw();
+
+    sendOk("stop");
+  });
+
+  server.on("/estop", HTTP_ANY, []() {
+
+    motorStopRaw();
+
+    estop = true;
+    armed = false;
+
+    sendOk("estop");
+  });
+
+  server.on("/estop/clear", HTTP_ANY, []() {
+
+    motorStopRaw();
+
+    estop = false;
+    armed = false;
+
+    sendOk("estop-clear");
+  });
+
+  server.on("/drive", HTTP_ANY, []() {
+
+    if (estop) {
+      sendError(409, "ESTOP_ACTIVE");
+      return;
+    }
+
+    if (!armed) {
+      sendError(409, "NOT_ARMED");
+      return;
+    }
+
+    if (!server.hasArg("left") || !server.hasArg("right")) {
+      sendError(
+        400,
+        "left and right parameters are required"
+      );
+      return;
+    }
+
+    int left = server.arg("left").toInt();
+    int right = server.arg("right").toInt();
+
+    uint32_t ttl = DEFAULT_TTL_MS;
+
+    if (server.hasArg("ttl")) {
+      long requested = server.arg("ttl").toInt();
+
+      if (requested > 0) {
+        ttl = constrain(
+          requested,
+          (long)MIN_TTL_MS,
+          (long)MAX_TTL_MS
+        );
+      }
+    }
+
+    applyDrive(left, right, ttl);
+
+    sendOk("drive");
+  });
+
+  server.onNotFound([]() {
+
+    if (server.method() == HTTP_OPTIONS) {
+      addCors();
+      server.send(204);
+      return;
+    }
+
+    sendError(404, "NOT_FOUND");
+  });
+}
+
+// ============================================================
 // Wi-Fi
-// ======================================================
+// ============================================================
 
-void connectWiFi() {
-  stopMotors("WIFI_CONNECT");
-
-  armed = false;
-
-  Serial.println();
-  Serial.println("======================================");
-  Serial.println("NEXT ESP32 MOTOR BRIDGE");
-  Serial.println("Connecting to Wi-Fi...");
-  Serial.println("======================================");
+void connectWifi() {
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  unsigned long startedAt = millis();
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(WIFI_SSID);
+
+  uint32_t lastPrint = 0;
 
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
 
-    if (millis() - startedAt > 30000) {
-      Serial.println();
-      Serial.println("[WIFI] Timeout. Retrying...");
+    delay(100);
 
-      WiFi.disconnect();
-      delay(1000);
-
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      startedAt = millis();
+    if (millis() - lastPrint >= 500) {
+      lastPrint = millis();
+      Serial.print(".");
     }
   }
 
+  wifiWasConnected = true;
+
   Serial.println();
-  Serial.println("[WIFI] CONNECTED");
+  Serial.println("Wi-Fi connected");
 
-  Serial.print("[WIFI] IP: ");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
-
-  Serial.print("[WIFI] RSSI: ");
-  Serial.println(WiFi.RSSI());
 }
 
-// ======================================================
+// ============================================================
 // Setup
-// ======================================================
+// ============================================================
 
 void setup() {
+
+  // Motors MUST be safe immediately.
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
+
+  motorStopRaw();
+
   Serial.begin(115200);
+  delay(300);
 
-  pinMode(PIN_IN1, OUTPUT);
-  pinMode(PIN_IN2, OUTPUT);
-  pinMode(PIN_IN3, OUTPUT);
-  pinMode(PIN_IN4, OUTPUT);
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("NES ESP32-CAM Motor Controller");
+  Serial.println(FW_VERSION);
+  Serial.println("==============================");
 
-  ledcAttach(
-    PIN_ENA,
-    PWM_FREQ,
-    PWM_RESOLUTION
-  );
+  Serial.println("Camera: DISABLED");
+  Serial.println("ENA/ENB GPIO: NOT USED");
 
-  ledcAttach(
-    PIN_ENB,
-    PWM_FREQ,
-    PWM_RESOLUTION
-  );
+  connectWifi();
 
-  stopMotors("BOOT");
-
-  delay(500);
-
-  connectWiFi();
-
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/ping", HTTP_GET, handlePing);
-  server.on("/state", HTTP_GET, handleState);
-
-  server.on("/arm", HTTP_POST, handleArm);
-  server.on("/disarm", HTTP_POST, handleDisarm);
-  server.on("/stop", HTTP_POST, handleStop);
-
-  server.on("/estop", HTTP_POST, handleEstop);
-  server.on("/estop/clear", HTTP_POST, handleEstopClear);
-
-  server.on("/drive", HTTP_POST, handleDrive);
-
-  server.onNotFound(handleNotFound);
+  setupRoutes();
 
   server.begin();
 
-  Serial.println();
-  Serial.println("[HTTP] Server started");
+  Serial.println("HTTP server ready");
 
-  Serial.println("[HTTP] GET  /ping");
-  Serial.println("[HTTP] GET  /state");
-  Serial.println("[HTTP] POST /arm");
-  Serial.println("[HTTP] POST /disarm");
-  Serial.println("[HTTP] POST /stop");
-  Serial.println("[HTTP] POST /drive");
-  Serial.println("[HTTP] POST /estop");
-  Serial.println("[HTTP] POST /estop/clear");
-
-  Serial.print("[NEXT] http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("/state");
+  Serial.print("Open: http://");
+  Serial.println(WiFi.localIP());
 }
 
-// ======================================================
+// ============================================================
 // Loop
-// ======================================================
+// ============================================================
 
 void loop() {
+
+  server.handleClient();
+
+  // ----------------------------------------------------------
+  // Deadman
+  // ----------------------------------------------------------
+
   if (
-    motionActive &&
-    millis() - lastDriveAt >= activeTtlMs
+    driveDeadlineMs != 0 &&
+    (int32_t)(millis() - driveDeadlineMs) >= 0
   ) {
-    stopMotors("COMMAND_TTL_EXPIRED");
+    motorStopRaw();
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    stopMotors("WIFI_LOST");
+  // ----------------------------------------------------------
+  // Wi-Fi safety
+  // ----------------------------------------------------------
+
+  bool connected = WiFi.status() == WL_CONNECTED;
+
+  if (!connected && wifiWasConnected) {
+
+    motorStopRaw();
 
     armed = false;
 
-    Serial.println("[WIFI] Connection lost.");
+    wifiWasConnected = false;
 
-    connectWiFi();
+    Serial.println("Wi-Fi lost -> motors stopped");
   }
 
-  server.handleClient();
+  if (connected && !wifiWasConnected) {
+
+    wifiWasConnected = true;
+
+    Serial.print("Wi-Fi restored: ");
+    Serial.println(WiFi.localIP());
+  }
 
   delay(2);
 }

@@ -1,10 +1,12 @@
-name: Build ESP32 DevKit Firmware
+name: Build ESP32-CAM Motor Firmware
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+
+  push:
+    paths:
+      - 'MyFirmware.ino'
+      - '.github/workflows/build.yml'
 
 jobs:
   build:
@@ -17,37 +19,79 @@ jobs:
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Install ESP32 Core 3.3.12
+      - name: Install ESP32 core
         run: |
-          arduino-cli config init
-
           arduino-cli core update-index \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            --additional-urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
           arduino-cli core install esp32:esp32@3.3.12 \
-            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            --additional-urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Prepare Arduino sketch
+      - name: Show board information
         run: |
-          mkdir -p sketch
-          cp MyFirmware.ino sketch/sketch.ino
+          arduino-cli board details \
+            --fqbn esp32:esp32:esp32cam
 
-      - name: Compile ESP32 DevKit
+      - name: Compile ESP32-CAM firmware
         run: |
           mkdir -p build
 
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
+            --fqbn esp32:esp32:esp32cam \
             --output-dir build \
-            sketch
+            .
 
-      - name: Show generated files
+      - name: Install esptool
         run: |
-          find build -maxdepth 2 -type f -print
+          python -m pip install --upgrade esptool
 
-      - name: Upload firmware artifact
+      - name: Create merged BIN
+        shell: bash
+        run: |
+          set -e
+
+          echo "Build directory:"
+          ls -lah build
+
+          BOOTLOADER="$(find build -maxdepth 1 -name '*.bootloader.bin' | head -n 1)"
+          PARTITIONS="$(find build -maxdepth 1 -name '*.partitions.bin' | head -n 1)"
+          APP="$(find build -maxdepth 1 -name '*.ino.bin' | head -n 1)"
+
+          BOOT_APP="$(find ~/.arduino15/packages/esp32/hardware/esp32/3.3.12 \
+            -name 'boot_app0.bin' | head -n 1)"
+
+          echo "BOOTLOADER=$BOOTLOADER"
+          echo "PARTITIONS=$PARTITIONS"
+          echo "APP=$APP"
+          echo "BOOT_APP=$BOOT_APP"
+
+          test -n "$BOOTLOADER"
+          test -n "$PARTITIONS"
+          test -n "$APP"
+          test -n "$BOOT_APP"
+
+          python -m esptool \
+            --chip esp32 \
+            merge-bin \
+            -o build/NES-ESP32-CAM-MOTOR-MERGED.bin \
+            --flash-mode dio \
+            --flash-freq 40m \
+            --flash-size 4MB \
+            0x1000 "$BOOTLOADER" \
+            0x8000 "$PARTITIONS" \
+            0xe000 "$BOOT_APP" \
+            0x10000 "$APP"
+
+          echo
+          echo "Merged image:"
+          ls -lh build/NES-ESP32-CAM-MOTOR-MERGED.bin
+
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-devkit-motors-v020
-          path: build/
+          name: NES-ESP32-CAM-MOTOR-FIRMWARE
+          path: |
+            build/*.bin
           if-no-files-found: error
