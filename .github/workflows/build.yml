@@ -1,12 +1,10 @@
 name: Build ESP32-CAM Motor Firmware
 
 on:
-  workflow_dispatch:
-
   push:
-    paths:
-      - 'MyFirmware.ino'
-      - '.github/workflows/build.yml'
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,79 +17,71 @@ jobs:
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Install ESP32 core
+      - name: Install ESP32 Core 3.3.12
         run: |
+          arduino-cli config init
+
           arduino-cli core update-index \
-            --additional-urls \
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
           arduino-cli core install esp32:esp32@3.3.12 \
-            --additional-urls \
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Show board information
+      - name: Prepare ESP32-CAM sketch
+        env:
+          WIFI_PASSWORD: ${{ secrets.WIFI_PASSWORD }}
         run: |
-          arduino-cli board details \
-            --fqbn esp32:esp32:esp32cam
+          mkdir -p sketch
+          cp MyFirmware.ino sketch/sketch.ino
 
-      - name: Compile ESP32-CAM firmware
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          import json
+
+          p = Path("sketch/sketch.ino")
+          s = p.read_text()
+
+          password = os.environ.get("WIFI_PASSWORD", "")
+
+          if not password:
+              raise SystemExit(
+                  "GitHub secret WIFI_PASSWORD is missing."
+              )
+
+          # json.dumps gives us a safely quoted C/C++ style string
+          # for ordinary Wi-Fi passwords.
+          quoted = json.dumps(password)
+
+          s = s.replace(
+              '"__WIFI_PASSWORD__"',
+              quoted
+          )
+
+          p.write_text(s)
+
+          print("Wi-Fi secret injected without printing it.")
+          PY
+
+      - name: Compile AI Thinker ESP32-CAM
         run: |
           mkdir -p build
 
           arduino-cli compile \
             --fqbn esp32:esp32:esp32cam \
             --output-dir build \
-            .
+            sketch
 
-      - name: Install esptool
+      - name: Verify firmware files
         run: |
-          python -m pip install --upgrade esptool
+          test -n "$(find build -type f -name '*.bin' -print -quit)"
+          find build -maxdepth 2 -type f \
+            \( -name '*.bin' -o -name '*.elf' \) \
+            -print
 
-      - name: Create merged BIN
-        shell: bash
-        run: |
-          set -e
-
-          echo "Build directory:"
-          ls -lah build
-
-          BOOTLOADER="$(find build -maxdepth 1 -name '*.bootloader.bin' | head -n 1)"
-          PARTITIONS="$(find build -maxdepth 1 -name '*.partitions.bin' | head -n 1)"
-          APP="$(find build -maxdepth 1 -name '*.ino.bin' | head -n 1)"
-
-          BOOT_APP="$(find ~/.arduino15/packages/esp32/hardware/esp32/3.3.12 \
-            -name 'boot_app0.bin' | head -n 1)"
-
-          echo "BOOTLOADER=$BOOTLOADER"
-          echo "PARTITIONS=$PARTITIONS"
-          echo "APP=$APP"
-          echo "BOOT_APP=$BOOT_APP"
-
-          test -n "$BOOTLOADER"
-          test -n "$PARTITIONS"
-          test -n "$APP"
-          test -n "$BOOT_APP"
-
-          python -m esptool \
-            --chip esp32 \
-            merge-bin \
-            -o build/NES-ESP32-CAM-MOTOR-MERGED.bin \
-            --flash-mode dio \
-            --flash-freq 40m \
-            --flash-size 4MB \
-            0x1000 "$BOOTLOADER" \
-            0x8000 "$PARTITIONS" \
-            0xe000 "$BOOT_APP" \
-            0x10000 "$APP"
-
-          echo
-          echo "Merged image:"
-          ls -lh build/NES-ESP32-CAM-MOTOR-MERGED.bin
-
-      - name: Upload firmware
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NES-ESP32-CAM-MOTOR-FIRMWARE
-          path: |
-            build/*.bin
+          name: esp32cam-motors-no-enable-v030
+          path: build/
           if-no-files-found: error
