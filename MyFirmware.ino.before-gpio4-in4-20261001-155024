@@ -33,7 +33,7 @@ WebServer server(80);
 //
 // RIGHT:
 // GPIO15 -> IN3
-// GPIO4  -> IN4
+// GPIO2  -> IN4
 //
 // ENA / ENB:
 // Jumpers installed, no wires to ESP32-CAM.
@@ -42,7 +42,7 @@ WebServer server(80);
 constexpr uint8_t PIN_IN1 = 13;
 constexpr uint8_t PIN_IN2 = 14;
 constexpr uint8_t PIN_IN3 = 15;
-constexpr uint8_t PIN_IN4 = 4;
+constexpr uint8_t PIN_IN4 = 2;
 
 constexpr bool LEFT_INVERT  = false;
 constexpr bool RIGHT_INVERT = true;
@@ -590,7 +590,7 @@ void setupMotors() {
   Serial.println("[MOTOR] GPIO13 -> IN1");
   Serial.println("[MOTOR] GPIO14 -> IN2");
   Serial.println("[MOTOR] GPIO15 -> IN3");
-  Serial.println("[MOTOR] GPIO4  -> IN4");
+  Serial.println("[MOTOR] GPIO2  -> IN4");
   Serial.println("[MOTOR] ENA/ENB -> jumpers");
 }
 
