@@ -2,6 +2,10 @@
 #include <WebServer.h>
 #include <Preferences.h>
 
+// Forward declarations for Arduino .ino auto-prototype generator
+struct BoardPinInfo;
+struct MotorConfig;
+
 // ============================================================
 // NES NEXT ESP32-CAM DYNAMIC HARDWARE BRIDGE
 // Firmware 0.4.0
@@ -37,7 +41,7 @@ const char* WIFI_SSID = "Osama";
 const char* WIFI_PASSWORD = "__WIFI_PASSWORD__";
 
 const char* DEVICE_NAME = "NEXT-ESP32CAM-MOTOR";
-const char* FIRMWARE_VERSION = "0.4.0";
+const char* FIRMWARE_VERSION = "0.4.1";
 
 WebServer server(80);
 Preferences prefs;
